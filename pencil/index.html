@@ -887,6 +887,11 @@ function copyReport() {
 }
 
 // ---------- boot ----------
+var UI_IDS = ['bar', 'opts', 'foot', 'hud', 'repbox'];
+function inUi(t) {
+  for (var i = 0; i < UI_IDS.length; i++) { var b = document.getElementById(UI_IDS[i]); if (b && t && b.contains && b.contains(t)) return true; }
+  return false;
+}
 function inReport(t) { var b = document.getElementById('repbox'); return !!(b && t && b.contains && b.contains(t)); }
 function wire() {
   rawCanvas = $('raw'); rawCtx = rawCanvas.getContext('2d');
@@ -911,7 +916,19 @@ function wire() {
     host.addEventListener(n, function (ev) { ev.preventDefault(); }, { passive: false });
   });
   document.addEventListener('selectstart', function (ev) { if (!inReport(ev.target)) ev.preventDefault(); }, { passive: false });
-  document.addEventListener('touchmove', function (ev) { if (!inReport(ev.target)) ev.preventDefault(); }, { passive: false });
+  // Gesture blocking is scoped to the drawing surface: preventDefault on touchmove over the toolbar cancels the
+// synthesized click after a Pencil tap (a tap always moves sub-pixel).
+  document.addEventListener('touchmove', function (ev) { if (!inUi(ev.target)) ev.preventDefault(); }, { passive: false });
+  // belt and braces: a pen pointerup on a toolbar button acts if no click follows within 300 ms (never both)
+  Array.prototype.forEach.call(document.querySelectorAll('#bar button'), function (b) {
+    var timer = null;
+    b.addEventListener('click', function () { if (timer) { clearTimeout(timer); timer = null; } }, true);
+    b.addEventListener('pointerup', function (ev) {
+      if (ev.pointerType !== 'pen') return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(function () { timer = null; b.click(); }, 300);
+    });
+  });
   document.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
   host.addEventListener('wheel', function (ev) {
     ev.preventDefault();
