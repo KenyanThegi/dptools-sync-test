@@ -1,0 +1,1115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DPTools Sync Test</title>
+<style>
+:root { color-scheme: dark; --bg:#111214; --card:#1b1d21; --line:#2c3037; --fg:#e8eaed; --dim:#9aa0a8; --acc:#4da3ff; --ok:#4cc38a; --bad:#ff6b6b; }
+* { box-sizing: border-box; }
+body { margin:0; padding:16px; padding-bottom:80px; background:var(--bg); color:var(--fg); font:16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; max-width:760px; margin-inline:auto; }
+h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:15px; margin:0 0 8px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin:12px 0; }
+button { font:inherit; min-height:48px; padding:10px 16px; margin:4px 6px 4px 0; border-radius:10px; border:1px solid var(--line); background:#262a31; color:var(--fg); }
+button.primary { background:var(--acc); color:#04121f; border-color:var(--acc); font-weight:600; }
+button.danger { border-color:var(--bad); color:var(--bad); }
+button:disabled { opacity:.45; }
+input[type=text], input[type=password] { font:inherit; min-height:48px; width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:#0d0e10; color:var(--fg); margin:4px 0; }
+.dim { color:var(--dim); font-size:14px; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+table { width:100%; border-collapse:collapse; font-size:14px; } th, td { text-align:left; padding:6px 4px; border-bottom:1px solid var(--line); vertical-align:top; word-break:break-word; }
+#log { max-height:220px; overflow:auto; font:12px/1.4 ui-monospace, Menlo, Consolas, monospace; white-space:pre-wrap; }
+[hidden] { display:none !important; }
+.pill { display:inline-block; padding:2px 10px; border-radius:99px; border:1px solid var(--line); font-size:13px; margin-right:6px; }
+</style>
+</head>
+<body>
+<h1>DPTools Sync Test <span class="dim" id="ver"></span></h1>
+<div class="dim">Fake test data only. Nothing here is real. <span id="netpill" class="pill">online</span><span id="queuepill" class="pill">queue 0</span></div>
+
+<section class="card" id="picker">
+  <h2>1. This device</h2>
+  <div>
+    <button data-device="Mac">Mac</button><button data-device="iPhone">iPhone</button><button data-device="iPad">iPad</button><button data-device="Windows">Windows</button>
+  </div>
+  <input type="text" id="customName" placeholder="or type a device name" autocomplete="off">
+  <button id="useCustom">Use this name</button>
+</section>
+
+<section class="card" id="connect" hidden>
+  <h2>2. Connect Dropbox</h2>
+  <div class="dim" id="who"></div>
+  <button class="primary" id="connectBtn">Connect Dropbox</button>
+  <button id="pasteModeBtn">No redirect: paste a code</button>
+  <div id="pasteBox" hidden>
+    <div class="dim">Open the Dropbox page, allow access, then paste the code Dropbox shows.</div>
+    <a id="pasteLink" href="#" target="_blank" rel="noopener">Open Dropbox authorize page</a>
+    <input type="text" id="pasteCode" placeholder="paste code here" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="pasteSubmit" class="primary">Use this code</button>
+  </div>
+</section>
+
+<section class="card" id="unlock" hidden>
+  <h2>3. Test passphrase</h2>
+  <div class="dim">A throwaway test phrase, the same on all four devices. Not a real key.</div>
+  <input type="password" id="pass" placeholder="test passphrase" autocomplete="off">
+  <button class="primary" id="unlockBtn">Unlock</button>
+  <div id="unlockMsg" class="bad"></div>
+</section>
+
+<section class="card" id="main" hidden>
+  <h2>4. Test</h2>
+  <button class="primary" id="writeBtn">Write test entry</button>
+  <button id="writePrevBtn">Write with preview</button>
+  <button id="syncBtn" class="primary">Sync now</button>
+  <div>
+    <input type="text" id="sharedVal" placeholder="value for shared record" autocomplete="off">
+    <button id="sharedBtn">Edit shared record</button>
+  </div>
+  <div class="dim" id="syncMsg"></div>
+  <div class="dim">Auto-sync every 30 s while this page is visible.</div>
+</section>
+
+<section class="card" id="status" hidden>
+  <h2>Status</h2>
+  <div id="summary"></div>
+  <h2 style="margin-top:12px">Devices</h2><div id="devices"></div>
+  <h2 style="margin-top:12px">Merged records</h2><div id="records"></div>
+  <h2 style="margin-top:12px">Conflicts</h2><div id="conflicts" class="dim">none</div>
+</section>
+
+<section class="card" id="logcard">
+  <h2>Log and errors</h2>
+  <div id="log" class="dim">no events yet</div>
+  <button id="copyBtn">Copy report</button>
+</section>
+
+<section class="card" id="danger" hidden>
+  <h2>Reset</h2>
+  <button class="danger" id="disconnectBtn">Disconnect / reset this device</button>
+  <div>
+    <input type="text" id="wipeConfirm" placeholder='type WIPE to enable' autocomplete="off">
+    <button class="danger" id="wipeBtn" disabled>Wipe test folder (/sync-test only)</button>
+  </div>
+</section>
+
+<script>
+(function () {
+'use strict';
+// sync-core.js: Dropbox per-device change-log sync. No DOM code. Runs in browsers and Node 22.
+// Inlined into public/index.html by tools/build-page.mjs: only `export function|const|class|async`
+// declarations are allowed (the build strips the `export` keyword). No imports, no default export.
+
+const APP_KEY = '9zlv3ezs3alogsd'; // public client id, PKCE, no secret
+const DEFAULT_HOSTS = {
+  api: 'https://api.dropboxapi.com',
+  content: 'https://content.dropboxapi.com',
+  www: 'https://www.dropbox.com',
+};
+const ROOT = '/sync-test';
+const FORMAT_VERSION = 1;
+const DEFAULT_ITERATIONS = 210000;
+const CONFLICT_WINDOW_MS = 60000;
+const CHECK_TEXT = 'dptools-sync-test-ok';
+
+// ---------- bytes / base64 ----------
+function bytesToB64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function b64ToBytes(b64) {
+  const s = atob(b64);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+function b64url(bytes) {
+  return bytesToB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function randomBytes(n) {
+  const a = new Uint8Array(n);
+  globalThis.crypto.getRandomValues(a);
+  return a;
+}
+function makeDeviceId() {
+  return 'd' + Array.from(randomBytes(4), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+/** Dropbox-API-Arg header value: JSON with every non-ASCII char escaped. */
+function apiArg(obj) {
+  return JSON.stringify(obj).replace(/[\u007f-￿]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+const pad8 = (n) => String(n).padStart(8, '0');
+
+// ---------- PKCE / OAuth ----------
+function generateVerifier() {
+  return b64url(randomBytes(32));
+}
+async function challengeFor(verifier) {
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return b64url(new Uint8Array(digest));
+}
+/** redirectUri omitted => paste-code mode (Dropbox shows the code). */
+function buildAuthorizeUrl({ appKey = APP_KEY, challenge, redirectUri, state, hosts = DEFAULT_HOSTS }) {
+  const p = new URLSearchParams();
+  p.set('client_id', appKey);
+  p.set('response_type', 'code');
+  p.set('code_challenge', challenge);
+  p.set('code_challenge_method', 'S256');
+  p.set('token_access_type', 'offline');
+  if (redirectUri) p.set('redirect_uri', redirectUri);
+  if (state) p.set('state', state);
+  return hosts.www + '/oauth2/authorize?' + p.toString();
+}
+
+// ---------- errors / log ----------
+class NetworkError extends Error {
+  constructor(endpoint, cause) {
+    super('Network failure on ' + endpoint + ': ' + (cause && cause.message ? cause.message : cause));
+    this.name = 'NetworkError';
+    this.endpoint = endpoint;
+  }
+}
+class DropboxError extends Error {
+  constructor(endpoint, status, body) {
+    const tag = DropboxError.tagOf(body);
+    super('Dropbox ' + endpoint + ' HTTP ' + status + (tag ? ' ' + tag : ''));
+    this.name = 'DropboxError';
+    this.endpoint = endpoint;
+    this.status = status;
+    this.body = body;
+    this.tag = tag;
+  }
+  static tagOf(body) {
+    if (!body || typeof body !== 'object') return '';
+    if (typeof body.error_summary === 'string') return body.error_summary;
+    if (typeof body.error === 'string') return body.error;
+    return '';
+  }
+  get isPathConflict() {
+    return this.status === 409 && /conflict/.test(this.tag);
+  }
+  get isNotFound() {
+    return this.status === 409 && /not_found/.test(this.tag);
+  }
+}
+class AuthError extends Error {
+  constructor(msg) {
+    super(msg);
+    this.name = 'AuthError';
+  }
+}
+class DecryptError extends Error {
+  constructor(msg) {
+    super(msg);
+    this.name = 'DecryptError';
+  }
+}
+
+class EventLog {
+  constructor(now = () => Date.now(), cap = 200) {
+    this.items = [];
+    this.now = now;
+    this.cap = cap;
+    this.listeners = [];
+  }
+  add(level, endpoint, message) {
+    const item = { time: this.now(), level, endpoint: endpoint || '', message: String(message) };
+    this.items.push(item);
+    if (this.items.length > this.cap) this.items.shift();
+    for (const l of this.listeners) l(item);
+    return item;
+  }
+  errors() {
+    return this.items.filter((i) => i.level === 'error');
+  }
+}
+
+// ---------- Dropbox client ----------
+class DropboxClient {
+  /**
+   * @param {object} o
+   * @param {{refreshToken?:string,accessToken?:string,expiresAt?:number}} [o.tokens]
+   * @param {(t:object)=>void} [o.onTokens] called whenever tokens change (persist them)
+   */
+  constructor(o = {}) {
+    this.appKey = o.appKey || APP_KEY;
+    this.hosts = o.hosts || DEFAULT_HOSTS;
+    this.fetch = o.fetch || ((...a) => globalThis.fetch(...a));
+    this.sleep = o.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.now = o.now || (() => Date.now());
+    this.log = o.log || new EventLog(this.now);
+    this.maxRetries = o.maxRetries ?? 5;
+    this.tokens = Object.assign({}, o.tokens || {});
+    this.onTokens = o.onTokens || (() => {});
+    this._refreshing = null;
+  }
+
+  get connected() {
+    return !!this.tokens.refreshToken;
+  }
+
+  async _tokenRequest(form, endpointName) {
+    let res;
+    try {
+      res = await this.fetch(this.hosts.api + '/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(form).toString(),
+      });
+    } catch (e) {
+      throw new NetworkError(endpointName, e);
+    }
+    const text = await res.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch (_) {}
+    if (!res.ok) {
+      const err = new DropboxError(endpointName, res.status, json || { error: text.slice(0, 200) });
+      this.log.add('error', endpointName, err.message + (json && json.error_description ? ' (' + json.error_description + ')' : ''));
+      throw err;
+    }
+    return json;
+  }
+
+  async exchangeCode(code, verifier, redirectUri) {
+    const form = { code, grant_type: 'authorization_code', client_id: this.appKey, code_verifier: verifier };
+    if (redirectUri) form.redirect_uri = redirectUri;
+    const j = await this._tokenRequest(form, '/oauth2/token (code)');
+    this.tokens = {
+      refreshToken: j.refresh_token,
+      accessToken: j.access_token,
+      expiresAt: this.now() + (j.expires_in || 14400) * 1000,
+    };
+    if (!this.tokens.refreshToken) throw new AuthError('Dropbox returned no refresh token (token_access_type=offline missing?)');
+    this.onTokens(this.tokens);
+    return this.tokens;
+  }
+
+  refresh() {
+    if (this._refreshing) return this._refreshing;
+    this._refreshing = (async () => {
+      if (!this.tokens.refreshToken) throw new AuthError('Not connected to Dropbox');
+      try {
+        const j = await this._tokenRequest(
+          { grant_type: 'refresh_token', refresh_token: this.tokens.refreshToken, client_id: this.appKey },
+          '/oauth2/token (refresh)'
+        );
+        this.tokens = Object.assign({}, this.tokens, {
+          accessToken: j.access_token,
+          expiresAt: this.now() + (j.expires_in || 14400) * 1000,
+        });
+        this.onTokens(this.tokens);
+      } catch (e) {
+        if (e instanceof DropboxError && (e.status === 400 || e.status === 401)) throw new AuthError('Dropbox refused the refresh token: reconnect this device');
+        throw e;
+      }
+    })().finally(() => {
+      this._refreshing = null;
+    });
+    return this._refreshing;
+  }
+
+  /** build(accessToken) => {url, init}. Handles expiry, 401 refresh-once, 429/503 Retry-After. */
+  async _call(endpoint, build) {
+    let refreshed = false;
+    let attempt = 0;
+    for (;;) {
+      if (!this.tokens.accessToken || (this.tokens.expiresAt && this.tokens.expiresAt - 60000 < this.now())) await this.refresh();
+      const { url, init } = build(this.tokens.accessToken);
+      let res;
+      try {
+        res = await this.fetch(url, init);
+      } catch (e) {
+        const ne = new NetworkError(endpoint, e);
+        this.log.add('error', endpoint, ne.message);
+        throw ne;
+      }
+      if (res.ok) return res;
+      const text = await res.text();
+      let body = null;
+      try {
+        body = JSON.parse(text);
+      } catch (_) {
+        body = { error: text.slice(0, 300) };
+      }
+      if (res.status === 401 && !refreshed) {
+        refreshed = true;
+        this.log.add('info', endpoint, '401, refreshing access token');
+        await this.refresh();
+        continue;
+      }
+      if ((res.status === 429 || res.status === 503) && attempt < this.maxRetries) {
+        const hdr = Number(res.headers.get('Retry-After'));
+        const fromBody = body && body.error && Number(body.error.retry_after);
+        const secs = hdr > 0 ? hdr : fromBody > 0 ? fromBody : Math.min(2 ** attempt, 30);
+        attempt++;
+        this.log.add('info', endpoint, 'HTTP ' + res.status + ', waiting ' + secs + ' s (retry ' + attempt + ')');
+        await this.sleep(secs * 1000);
+        continue;
+      }
+      const err = new DropboxError(endpoint, res.status, body);
+      this.log.add('error', endpoint, err.message);
+      throw err;
+    }
+  }
+
+  async rpc(endpoint, args) {
+    const res = await this._call('/2/' + endpoint, (tok) => ({
+      url: this.hosts.api + '/2/' + endpoint,
+      init: {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+        body: JSON.stringify(args),
+      },
+    }));
+    return res.json();
+  }
+
+  /** mode: 'add' (never overwrites; 409 on conflict) or 'overwrite'. autorename is always false. */
+  async upload(path, bytes, mode = 'add') {
+    const res = await this._call('/2/files/upload', (tok) => ({
+      url: this.hosts.content + '/2/files/upload',
+      init: {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + tok,
+          'Content-Type': 'application/octet-stream',
+          'Dropbox-API-Arg': apiArg({ path, mode, autorename: false, mute: true }),
+        },
+        body: bytes,
+      },
+    }));
+    return res.json();
+  }
+
+  async download(path) {
+    const res = await this._call('/2/files/download', (tok) => ({
+      url: this.hosts.content + '/2/files/download',
+      init: {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + tok,
+          // No Content-Type on download: empty body; Dropbox rejects unexpected body types here.
+          'Dropbox-API-Arg': apiArg({ path }),
+        },
+      },
+    }));
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  listFolder(path, recursive = true) {
+    return this.rpc('files/list_folder', { path, recursive, include_deleted: false, limit: 2000 });
+  }
+  listContinue(cursor) {
+    return this.rpc('files/list_folder/continue', { cursor });
+  }
+  createFolder(path) {
+    return this.rpc('files/create_folder_v2', { path, autorename: false });
+  }
+  deletePath(path) {
+    return this.rpc('files/delete_v2', { path });
+  }
+
+  async revoke() {
+    await this._call('/2/auth/token/revoke', (tok) => ({
+      url: this.hosts.api + '/2/auth/token/revoke',
+      init: { method: 'POST', headers: { Authorization: 'Bearer ' + tok } },
+    }));
+    this.tokens = {};
+    this.onTokens(this.tokens);
+  }
+}
+
+// ---------- crypto ----------
+const subtle = () => globalThis.crypto.subtle;
+
+async function deriveKey(passphrase, saltB64, iterations) {
+  const base = await subtle().importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  return subtle().deriveKey(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: b64ToBytes(saltB64), iterations },
+    base,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+async function exportKeyB64(key) {
+  return bytesToB64(new Uint8Array(await subtle().exportKey('raw', key)));
+}
+function importKeyB64(b64) {
+  return subtle().importKey('raw', b64ToBytes(b64), { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+}
+/** Returns UTF-8 bytes of a small JSON envelope {v, iv, ct}. aad binds the ciphertext to its location. */
+async function encryptJson(key, obj, aad) {
+  const iv = randomBytes(12);
+  const ct = await subtle().encrypt(
+    { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(aad) },
+    key,
+    new TextEncoder().encode(JSON.stringify(obj))
+  );
+  return new TextEncoder().encode(JSON.stringify({ v: FORMAT_VERSION, iv: bytesToB64(iv), ct: bytesToB64(new Uint8Array(ct)) }));
+}
+async function decryptJson(key, bytes, aad) {
+  let env;
+  try {
+    env = typeof bytes === 'string' || bytes instanceof Uint8Array ? JSON.parse(typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes)) : bytes;
+    if (!env || env.v !== FORMAT_VERSION || !env.iv || !env.ct) throw new Error('bad envelope');
+  } catch (e) {
+    throw new DecryptError('Not a valid encrypted entry');
+  }
+  try {
+    const pt = await subtle().decrypt(
+      { name: 'AES-GCM', iv: b64ToBytes(env.iv), additionalData: new TextEncoder().encode(aad) },
+      key,
+      b64ToBytes(env.ct)
+    );
+    return JSON.parse(new TextDecoder().decode(pt));
+  } catch (e) {
+    throw new DecryptError("Can't decrypt (wrong passphrase or damaged file)");
+  }
+}
+
+// ---------- local stores ----------
+class MemoryStore {
+  constructor() {
+    this.m = new Map();
+  }
+  async get(k) {
+    return this.m.has(k) ? JSON.parse(this.m.get(k)) : undefined;
+  }
+  async set(k, v) {
+    this.m.set(k, JSON.stringify(v));
+  }
+  async del(k) {
+    this.m.delete(k);
+  }
+}
+class LocalStorageStore {
+  constructor(ls, prefix = 'dptools-sync-test:') {
+    this.ls = ls;
+    this.prefix = prefix;
+  }
+  async get(k) {
+    const v = this.ls.getItem(this.prefix + k);
+    return v == null ? undefined : JSON.parse(v);
+  }
+  async set(k, v) {
+    this.ls.setItem(this.prefix + k, JSON.stringify(v));
+  }
+  async del(k) {
+    this.ls.removeItem(this.prefix + k);
+  }
+}
+class IdbStore {
+  constructor(db) {
+    this.db = db;
+  }
+  _tx(mode, fn) {
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction('kv', mode);
+      const req = fn(tx.objectStore('kv'));
+      tx.oncomplete = () => resolve(req && req.result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+  get(k) {
+    return this._tx('readonly', (s) => s.get(k));
+  }
+  async set(k, v) {
+    await this._tx('readwrite', (s) => s.put(v, k));
+  }
+  async del(k) {
+    await this._tx('readwrite', (s) => s.delete(k));
+  }
+}
+/** IndexedDB if it works, localStorage otherwise. */
+async function createBrowserStore(dbName = 'dptools-sync-test', g = globalThis) {
+  if (g.indexedDB) {
+    try {
+      const db = await new Promise((resolve, reject) => {
+        const rq = g.indexedDB.open(dbName, 1);
+        rq.onupgradeneeded = () => rq.result.createObjectStore('kv');
+        rq.onsuccess = () => resolve(rq.result);
+        rq.onerror = () => reject(rq.error);
+        rq.onblocked = () => reject(new Error('blocked'));
+      });
+      const s = new IdbStore(db);
+      await s.set('__probe', 1);
+      return s;
+    } catch (_) {
+      /* fall through to localStorage */
+    }
+  }
+  return new LocalStorageStore(g.localStorage, dbName + ':');
+}
+
+// ---------- merge (pure) ----------
+const cmpEntry = (a, b) => a.ts - b.ts || (a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0) || a.seq - b.seq;
+
+/**
+ * Deterministic merge of all entries: same input set => same output on every device.
+ * Winner per recordId+field = latest (ts, deviceId, seq). A conflict is counted when two consecutive
+ * writes to the same field come from different devices within CONFLICT_WINDOW_MS.
+ */
+function mergeEntries(list, windowMs = CONFLICT_WINDOW_MS) {
+  const sorted = list.slice().sort(cmpEntry);
+  const records = {};
+  const lastBy = new Map();
+  const conflicts = [];
+  for (const e of sorted) {
+    const k = e.recordId + '\u0000' + e.field;
+    const prev = lastBy.get(k);
+    if (prev && prev.deviceId !== e.deviceId && e.ts - prev.ts <= windowMs) {
+      conflicts.push({ recordId: e.recordId, field: e.field, a: prev.deviceId + '#' + prev.seq, b: e.deviceId + '#' + e.seq });
+    }
+    lastBy.set(k, e);
+    (records[e.recordId] || (records[e.recordId] = {}))[e.field] = { value: e.value, ts: e.ts, deviceId: e.deviceId, seq: e.seq, hasPreview: !!e.preview };
+  }
+  const ordered = {};
+  for (const id of Object.keys(records).sort()) {
+    ordered[id] = {};
+    for (const f of Object.keys(records[id]).sort()) ordered[id][f] = records[id][f];
+  }
+  return { records: ordered, conflicts, count: sorted.length };
+}
+
+// ---------- sync engine ----------
+function freshState() {
+  return { lastSeq: 0, pending: [], written: 0, cursor: null, seen: [], entries: {}, devices: {}, lastSync: null, lastTimings: null };
+}
+
+class SyncEngine {
+  constructor(o) {
+    this.client = o.client;
+    this.store = o.store;
+    this.deviceId = o.deviceId;
+    this.deviceName = o.deviceName || o.deviceId;
+    this.now = o.now || (() => Date.now());
+    this.log = o.log || this.client.log;
+    this.iterations = o.iterations || DEFAULT_ITERATIONS;
+    this.root = o.root || ROOT;
+    this.key = null;
+    this.state = freshState();
+    this.syncing = false;
+  }
+
+  async load() {
+    const s = await this.store.get('sync-state');
+    this.state = Object.assign(freshState(), s || {});
+    return this;
+  }
+  _persist() {
+    return this.store.set('sync-state', this.state);
+  }
+  get metaPath() {
+    return this.root + '/meta.json';
+  }
+  _devPath(id, rest) {
+    return this.root + '/devices/' + id + '/' + rest;
+  }
+  _logPath(id, seq) {
+    return this._devPath(id, 'log/' + pad8(seq) + '.json');
+  }
+  get unlocked() {
+    return !!this.key;
+  }
+
+  /** Use a key cached by a previous successful unlock (no network). */
+  async restoreKey() {
+    const c = await this.store.get('key');
+    if (!c) return false;
+    this.key = await importKeyB64(c.raw);
+    return true;
+  }
+
+  /**
+   * Derive the key from the passphrase and the salt in /sync-test/meta.json (created by the first device).
+   * Wrong passphrase => DecryptError, nothing is written (meta is only ever created, never overwritten).
+   */
+  async unlock(passphrase) {
+    let meta = await this._readMeta();
+    if (!meta) {
+      const salt = bytesToB64(randomBytes(16));
+      const key = await deriveKey(passphrase, salt, this.iterations);
+      const check = JSON.parse(new TextDecoder().decode(await encryptJson(key, { check: CHECK_TEXT }, 'meta')));
+      meta = { format: FORMAT_VERSION, salt, iterations: this.iterations, createdBy: this.deviceId, createdAt: this.now(), check };
+      try {
+        await this.client.upload(this.metaPath, new TextEncoder().encode(JSON.stringify(meta)), 'add');
+      } catch (e) {
+        if (!(e instanceof DropboxError && e.isPathConflict)) throw e;
+        meta = await this._readMeta(); // another device created it first: use theirs
+        if (!meta) throw e;
+      }
+    }
+    const key = await deriveKey(passphrase, meta.salt, meta.iterations);
+    let ok;
+    try {
+      ok = (await decryptJson(key, meta.check, 'meta')).check === CHECK_TEXT;
+    } catch (_) {
+      ok = false;
+    }
+    if (!ok) throw new DecryptError("Can't decrypt: this passphrase does not match the one used by the first device. Nothing was written.");
+    this.key = key;
+    await this.store.set('key', { raw: await exportKeyB64(key) });
+    return meta;
+  }
+
+  async _readMeta() {
+    try {
+      return JSON.parse(new TextDecoder().decode(await this.client.download(this.metaPath)));
+    } catch (e) {
+      if (e instanceof DropboxError && e.isNotFound) return null;
+      throw e;
+    }
+  }
+
+  /** Queue a fake record change locally. Works offline. */
+  async writeEntry({ recordId, field, value, preview }) {
+    const entry = { recordId, field, value, ts: this.now(), deviceId: this.deviceId, seq: ++this.state.lastSeq };
+    if (preview) entry.preview = preview;
+    this.state.pending.push(entry);
+    this.state.entries[entry.deviceId + '/' + entry.seq] = entry;
+    await this._persist();
+    return entry;
+  }
+
+  _dev(id) {
+    return this.state.devices[id] || (this.state.devices[id] = { name: id, firstSeen: null, lastSync: null, decryptOk: 0, decryptFail: 0 });
+  }
+
+  /** Upload own pending entries in order, then read other devices' new files. Never throws on offline. */
+  async sync() {
+    const result = { ok: false, offline: false, uploaded: 0, downloaded: 0, conflictsOnAdd: 0, error: null };
+    if (!this.key) throw new AuthError('Locked: enter the test passphrase first');
+    if (this.syncing) return Object.assign(result, { error: 'sync already running' });
+    this.syncing = true;
+    const t0 = this.now();
+    const timings = {};
+    try {
+      await this._upload(result);
+      timings.uploadMs = this.now() - t0;
+      const t1 = this.now();
+      await this._download(result);
+      timings.downloadMs = this.now() - t1;
+      await this._touchDevice();
+      this.state.lastSync = this.now();
+      result.ok = true;
+    } catch (e) {
+      if (e instanceof NetworkError) result.offline = true;
+      else if (e instanceof AuthError) throw e;
+      else result.error = e.message;
+    } finally {
+      this.syncing = false;
+      timings.totalMs = this.now() - t0;
+      this.state.lastTimings = Object.assign(timings, { uploaded: result.uploaded, downloaded: result.downloaded, offline: result.offline });
+      await this._persist();
+    }
+    return result;
+  }
+
+  async _upload(result) {
+    while (this.state.pending.length) {
+      const e = this.state.pending[0];
+      const path = this._logPath(e.deviceId, e.seq);
+      const bytes = await encryptJson(this.key, e, e.deviceId + '/' + e.seq);
+      try {
+        await this.client.upload(path, bytes, 'add');
+        result.uploaded++;
+      } catch (err) {
+        if (err instanceof DropboxError && err.isPathConflict) {
+          // already there (an earlier upload whose reply was lost). Report it, do not loop, do not overwrite.
+          result.conflictsOnAdd++;
+          this.log.add('error', '/2/files/upload', 'path conflict for ' + path + ': file already exists, treated as uploaded');
+        } else throw err;
+      }
+      this.state.pending.shift();
+      this.state.written++;
+      await this._persist();
+    }
+  }
+
+  async _listAll() {
+    const out = [];
+    let res;
+    if (this.state.cursor) {
+      try {
+        res = await this.client.listContinue(this.state.cursor);
+      } catch (e) {
+        if (!(e instanceof DropboxError && e.status === 409 && /reset/.test(e.tag))) throw e;
+        this.state.cursor = null; // cursor invalid: relist; the seen-set prevents re-downloads
+      }
+    }
+    if (!res) {
+      try {
+        res = await this.client.listFolder(this.root + '/devices', true);
+      } catch (e) {
+        if (e instanceof DropboxError && e.isNotFound) return { entries: [], cursor: null };
+        throw e;
+      }
+    }
+    out.push(...res.entries);
+    while (res.has_more) {
+      res = await this.client.listContinue(res.cursor);
+      out.push(...res.entries);
+    }
+    return { entries: out, cursor: res.cursor };
+  }
+
+  async _download(result) {
+    const { entries, cursor } = await this._listAll();
+    const logRe = /^\/sync-test\/devices\/([^/]+)\/log\/(\d{8})\.json$/;
+    const devRe = /^\/sync-test\/devices\/([^/]+)\/device\.json$/;
+    const seen = new Set(this.state.seen);
+    for (const ent of entries) {
+      if (ent['.tag'] !== 'file') continue;
+      const p = (ent.path_lower || '').replace(this.root.toLowerCase(), this.root);
+      let m = p.match(logRe);
+      if (m) {
+        const [, id, seqStr] = m;
+        if (id === this.deviceId || seen.has(p)) continue;
+        const seq = Number(seqStr);
+        const dev = this._dev(id);
+        const bytes = await this.client.download(ent.path_lower);
+        result.downloaded++;
+        try {
+          const e = await decryptJson(this.key, bytes, id + '/' + seq);
+          this.state.entries[id + '/' + seq] = e;
+          dev.decryptOk++;
+        } catch (err) {
+          dev.decryptFail++;
+          this.log.add('error', 'decrypt', id + '/' + seqStr + ': ' + err.message);
+        }
+        seen.add(p);
+        this.state.seen = Array.from(seen);
+        continue;
+      }
+      m = p.match(devRe);
+      if (m && m[1] !== this.deviceId) {
+        try {
+          const j = JSON.parse(new TextDecoder().decode(await this.client.download(ent.path_lower)));
+          Object.assign(this._dev(m[1]), { name: j.name, firstSeen: j.firstSeen, lastSync: j.lastSync });
+        } catch (err) {
+          this.log.add('error', 'device.json', m[1] + ': ' + err.message);
+        }
+      }
+    }
+    this.state.cursor = cursor;
+    this.state.seen = Array.from(seen);
+  }
+
+  async _touchDevice() {
+    const me = this._dev(this.deviceId);
+    me.name = this.deviceName;
+    me.firstSeen = me.firstSeen || this.now();
+    me.lastSync = this.now();
+    const body = { name: me.name, firstSeen: me.firstSeen, lastSync: me.lastSync };
+    await this.client.upload(this._devPath(this.deviceId, 'device.json'), new TextEncoder().encode(JSON.stringify(body)), 'overwrite');
+  }
+
+  /** Everything the status screen needs. */
+  view() {
+    const all = Object.values(this.state.entries);
+    const merged = mergeEntries(all);
+    const byDev = {};
+    for (const e of all) {
+      const d = byDev[e.deviceId] || (byDev[e.deviceId] = { count: 0, highestSeq: 0 });
+      d.count++;
+      if (e.seq > d.highestSeq) d.highestSeq = e.seq;
+    }
+    const ids = new Set([...Object.keys(this.state.devices), ...Object.keys(byDev), this.deviceId]);
+    const devices = Array.from(ids)
+      .sort()
+      .map((id) => {
+        const d = this.state.devices[id] || {};
+        return {
+          id,
+          name: d.name || id,
+          self: id === this.deviceId,
+          entries: (byDev[id] || {}).count || 0,
+          highestSeq: (byDev[id] || {}).highestSeq || 0,
+          lastSync: d.lastSync || null,
+          decryptOk: d.decryptOk || 0,
+          decryptFail: d.decryptFail || 0,
+        };
+      });
+    return {
+      deviceId: this.deviceId,
+      deviceName: this.deviceName,
+      total: merged.count,
+      records: merged.records,
+      conflicts: merged.conflicts,
+      devices,
+      pending: this.state.pending.length,
+      lastSync: this.state.lastSync,
+      lastTimings: this.state.lastTimings,
+    };
+  }
+
+  /** Delete the remote test folder only, then forget all local sync data. */
+  async wipeRemote() {
+    try {
+      await this.client.deletePath(this.root);
+    } catch (e) {
+      if (!(e instanceof DropboxError && e.isNotFound)) throw e;
+    }
+    this.state = freshState();
+    await this._persist();
+  }
+}
+
+// ---------- report (no tokens, no passphrase) ----------
+function buildReport({ view, errors = [], userAgent = '', online = true, version = '0.1.0', now = Date.now() }) {
+  const t = (ms) => (ms ? new Date(ms).toISOString() : 'never');
+  const L = [];
+  L.push('Sync Test report ' + version + ' @ ' + t(now));
+  L.push('This device: ' + view.deviceName + ' (' + view.deviceId + ')  online=' + online);
+  L.push('Entries total: ' + view.total + '   pending upload: ' + view.pending + '   conflicts: ' + view.conflicts.length);
+  L.push('Last sync: ' + t(view.lastSync));
+  if (view.lastTimings) L.push('Last sync timings: ' + JSON.stringify(view.lastTimings));
+  L.push('Devices:');
+  for (const d of view.devices) {
+    L.push('  - ' + d.name + (d.self ? ' (this)' : '') + ' [' + d.id + '] entries=' + d.entries + ' highestSeq=' + d.highestSeq + ' lastSync=' + t(d.lastSync) + ' decrypt ok/fail=' + d.decryptOk + '/' + d.decryptFail);
+  }
+  L.push('Records:');
+  for (const [id, fields] of Object.entries(view.records)) {
+    for (const [f, v] of Object.entries(fields)) L.push('  ' + id + '.' + f + ' = ' + JSON.stringify(v.value) + ' (' + v.deviceId + '#' + v.seq + (v.hasPreview ? ', preview' : '') + ')');
+  }
+  if (view.conflicts.length) {
+    L.push('Conflicts:');
+    for (const c of view.conflicts) L.push('  ' + c.recordId + '.' + c.field + ' ' + c.a + ' vs ' + c.b);
+  }
+  L.push('Errors (' + errors.length + '):');
+  for (const e of errors.slice(-20)) L.push('  ' + t(e.time) + ' ' + e.endpoint + ' ' + e.message);
+  L.push('User agent: ' + userAgent);
+  return L.join('\n');
+}
+
+// page.js: UI glue. Concatenated after sync-core.js inside one IIFE by tools/build-page.mjs.
+const VERSION = '0.1.0';
+const $ = (id) => document.getElementById(id);
+const LS = window.localStorage;
+const auth = new LocalStorageStore(LS, 'dptools-sync-auth:');
+const nowFn = () => Date.now();
+const events = new EventLog(nowFn);
+let local = {}; // deviceId, deviceName, tokens, verifier, state
+let client = null;
+let engine = null;
+let autoTimer = null;
+
+const fmt = (ms) => (ms ? new Date(ms).toLocaleTimeString() : 'never');
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function show(id, on) { $(id).hidden = !on; }
+
+function renderLog() {
+  const el = $('log');
+  if (!events.items.length) { el.textContent = 'no events yet'; return; }
+  el.innerHTML = events.items.slice(-60).reverse().map((i) => '<div class="' + (i.level === 'error' ? 'bad' : '') + '">' + fmt(i.time) + ' ' + esc(i.endpoint) + ' ' + esc(i.message) + '</div>').join('');
+}
+events.listeners.push(renderLog);
+
+function redirectUri() { return location.origin + location.pathname; }
+
+async function saveLocal() { await auth.set('local', local); }
+
+function stage() {
+  const named = !!local.deviceName;
+  const connected = !!(client && client.connected);
+  const unlocked = !!(engine && engine.unlocked);
+  show('picker', !named);
+  show('connect', named && !connected);
+  show('unlock', named && connected && !unlocked);
+  show('main', unlocked);
+  show('status', unlocked);
+  show('danger', named);
+  $('who').textContent = named ? 'Device: ' + local.deviceName + ' (' + local.deviceId + ')' : '';
+}
+
+function renderStatus() {
+  if (!engine) return;
+  const v = engine.view();
+  $('queuepill').textContent = 'queue ' + v.pending;
+  if (!engine.unlocked) return;
+  $('summary').innerHTML = 'Entries: <b>' + v.total + '</b> &middot; pending: <b>' + v.pending + '</b> &middot; last sync: ' + fmt(v.lastSync) + (v.lastTimings ? ' (' + v.lastTimings.totalMs + ' ms)' : '');
+  $('devices').innerHTML = '<table><tr><th>Device</th><th>Written</th><th>Top seq</th><th>Last sync</th><th>Decrypt</th></tr>' +
+    v.devices.map((d) => '<tr><td>' + esc(d.name) + (d.self ? ' (this)' : '') + '</td><td>' + d.entries + '</td><td>' + d.highestSeq + '</td><td>' + fmt(d.lastSync) + '</td><td class="' + (d.decryptFail ? 'bad' : 'ok') + '">' + (d.decryptFail ? 'FAIL ' + d.decryptFail : 'OK') + '</td></tr>').join('') + '</table>';
+  const rows = [];
+  for (const [id, fields] of Object.entries(v.records)) for (const [f, x] of Object.entries(fields)) rows.push('<tr><td>' + esc(id) + '</td><td>' + esc(f) + '</td><td>' + esc(x.value) + (x.hasPreview ? ' [preview]' : '') + '</td><td>' + esc(x.deviceId) + '#' + x.seq + '</td></tr>');
+  $('records').innerHTML = rows.length ? '<table><tr><th>Record</th><th>Field</th><th>Value</th><th>By</th></tr>' + rows.join('') + '</table>' : '<span class="dim">none yet</span>';
+  $('conflicts').innerHTML = v.conflicts.length ? '<b class="bad">' + v.conflicts.length + '</b> ' + v.conflicts.map((c) => esc(c.recordId + '.' + c.field + ' ' + c.a + ' vs ' + c.b)).join('; ') : 'none';
+}
+
+function setNet() {
+  const on = navigator.onLine !== false;
+  $('netpill').textContent = on ? 'online' : 'offline';
+  $('netpill').className = 'pill ' + (on ? 'ok' : 'bad');
+}
+
+async function doSync(manual) {
+  if (!engine || !engine.unlocked) return;
+  $('syncMsg').textContent = 'syncing...';
+  try {
+    const r = await engine.sync();
+    $('syncMsg').textContent = r.offline ? 'Offline or unreachable: entries stay queued.' : r.ok ? 'Synced: up ' + r.uploaded + ', down ' + r.downloaded + (r.conflictsOnAdd ? ', ' + r.conflictsOnAdd + ' path conflict(s), see log' : '') : 'Sync problem: ' + r.error;
+    if (r.offline) events.add('error', 'sync', 'offline, ' + engine.view().pending + ' queued');
+  } catch (e) {
+    $('syncMsg').textContent = e.message;
+    events.add('error', 'sync', e.message);
+  }
+  renderStatus();
+}
+
+function startAuto() {
+  if (autoTimer) return;
+  autoTimer = setInterval(() => { if (document.visibilityState === 'visible' && navigator.onLine !== false) doSync(false); }, 30000);
+}
+
+function makePreview() {
+  const c = document.createElement('canvas');
+  c.width = 480; c.height = 480;
+  const g = c.getContext('2d');
+  if (!g) return 'data:image/jpeg;base64,' + bytesToB64(randomBytes(50 * 1024));
+  const img = g.createImageData(480, 480);
+  const noise = randomBytes(480 * 480);
+  for (let i = 0; i < 480 * 480; i++) { const v = noise[i]; img.data[i * 4] = v; img.data[i * 4 + 1] = 255 - v; img.data[i * 4 + 2] = (v * 7) & 255; img.data[i * 4 + 3] = 255; }
+  g.putImageData(img, 0, 0);
+  let q = 0.3, url = c.toDataURL('image/jpeg', q);
+  for (let i = 0; i < 8 && url.length > 70000; i++) { q = q * 0.7; url = c.toDataURL('image/jpeg', q); }
+  return url;
+}
+
+async function ensureEngine() {
+  client = new DropboxClient({ log: events, now: nowFn, tokens: local.tokens || {}, onTokens: (t) => { local.tokens = t; saveLocal(); } });
+  const store = await createBrowserStore('dptools-sync-test');
+  engine = new SyncEngine({ client, store, deviceId: local.deviceId, deviceName: local.deviceName, now: nowFn, log: events });
+  await engine.load();
+  if (client.connected) { try { await engine.restoreKey(); } catch (_) {} }
+}
+
+async function afterConnected() {
+  stage();
+  if (engine.unlocked) { renderStatus(); startAuto(); doSync(false); }
+}
+
+async function beginConnect(paste) {
+  const verifier = generateVerifier();
+  const state = b64url(randomBytes(12));
+  local.pending = { verifier, state, paste: !!paste };
+  await saveLocal();
+  const url = buildAuthorizeUrl({ challenge: await challengeFor(verifier), redirectUri: paste ? undefined : redirectUri(), state: paste ? undefined : state });
+  if (paste) { $('pasteLink').href = url; show('pasteBox', true); $('pasteLink').click(); }
+  else location.href = url;
+}
+
+async function finishConnect(code, redirect) {
+  try {
+    await client.exchangeCode(code, local.pending.verifier, redirect);
+    local.pending = null;
+    await saveLocal();
+    events.add('info', 'oauth', 'connected');
+  } catch (e) {
+    events.add('error', 'oauth', e.message);
+  }
+  await afterConnected();
+}
+
+async function init() {
+  $('ver').textContent = 'v' + VERSION;
+  local = (await auth.get('local')) || {};
+  if (!local.deviceId) { local.deviceId = makeDeviceId(); await saveLocal(); }
+  setNet();
+  window.addEventListener('online', () => { setNet(); doSync(false); });
+  window.addEventListener('offline', setNet);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') doSync(false); });
+
+  async function pick(name) {
+    name = String(name || '').trim();
+    if (!name) return;
+    local.deviceName = name;
+    await saveLocal();
+    await ensureEngine();
+    engine.deviceName = name;
+    stage();
+  }
+  document.querySelectorAll('[data-device]').forEach((b) => b.addEventListener('click', () => pick(b.getAttribute('data-device'))));
+  $('useCustom').addEventListener('click', () => pick($('customName').value));
+
+  $('connectBtn').addEventListener('click', () => beginConnect(false));
+  $('pasteModeBtn').addEventListener('click', () => beginConnect(true));
+  $('pasteSubmit').addEventListener('click', () => { const c = $('pasteCode').value.trim(); if (c && local.pending) finishConnect(c, undefined); });
+
+  $('unlockBtn').addEventListener('click', async () => {
+    $('unlockMsg').textContent = '';
+    try {
+      await engine.unlock($('pass').value);
+      $('pass').value = '';
+      stage(); renderStatus(); startAuto(); doSync(false);
+    } catch (e) {
+      $('unlockMsg').textContent = e.message;
+      events.add('error', 'unlock', e.message);
+    }
+  });
+
+  $('writeBtn').addEventListener('click', async () => {
+    const n = engine.state.lastSeq + 1;
+    await engine.writeEntry({ recordId: 'loc-' + local.deviceId + '-' + n, field: 'name', value: 'Test location ' + n + ' note ' + Math.floor(Math.random() * 1000) });
+    renderStatus();
+  });
+  $('writePrevBtn').addEventListener('click', async () => {
+    const n = engine.state.lastSeq + 1;
+    await engine.writeEntry({ recordId: 'loc-' + local.deviceId + '-' + n, field: 'name', value: 'Test location ' + n + ' with preview', preview: makePreview() });
+    renderStatus();
+  });
+  $('sharedBtn').addEventListener('click', async () => {
+    const v = $('sharedVal').value.trim() || local.deviceName + ' ' + new Date().toLocaleTimeString();
+    await engine.writeEntry({ recordId: 'shared-1', field: 'title', value: v });
+    renderStatus();
+  });
+  $('syncBtn').addEventListener('click', () => doSync(true));
+
+  $('copyBtn').addEventListener('click', async () => {
+    const v = engine ? engine.view() : { deviceName: local.deviceName || '-', deviceId: local.deviceId, total: 0, pending: 0, conflicts: [], devices: [], records: {}, lastSync: null, lastTimings: null };
+    const text = buildReport({ view: v, errors: events.errors(), userAgent: navigator.userAgent, online: navigator.onLine !== false, version: VERSION });
+    try { await navigator.clipboard.writeText(text); $('syncMsg').textContent = 'Report copied.'; }
+    catch (_) { $('log').textContent = text; $('syncMsg').textContent = 'Clipboard blocked: report shown in the log box, copy it by hand.'; }
+  });
+
+  $('disconnectBtn').addEventListener('click', async () => {
+    if (client && client.connected) { try { await client.revoke(); } catch (e) { events.add('error', 'revoke', e.message); } }
+    if (engine) { await engine.store.del('sync-state'); await engine.store.del('key'); }
+    const id = local.deviceId;
+    Object.keys(LS).filter((k) => k.indexOf('dptools-sync-') === 0).forEach((k) => LS.removeItem(k));
+    local = { deviceId: id };
+    await saveLocal();
+    location.href = location.pathname;
+  });
+  $('wipeConfirm').addEventListener('input', () => { $('wipeBtn').disabled = $('wipeConfirm').value.trim() !== 'WIPE'; });
+  $('wipeBtn').addEventListener('click', async () => {
+    try { await engine.wipeRemote(); events.add('info', 'wipe', '/sync-test deleted'); } catch (e) { events.add('error', 'wipe', e.message); }
+    $('wipeConfirm').value = ''; $('wipeBtn').disabled = true;
+    renderStatus();
+  });
+
+  if (local.deviceName) await ensureEngine();
+  // OAuth redirect return
+  const q = new URLSearchParams(location.search);
+  if (q.get('code') && local.pending && local.pending.state === q.get('state') && client) {
+    history.replaceState(null, '', location.pathname);
+    await finishConnect(q.get('code'), redirectUri());
+  } else if (q.get('error')) {
+    events.add('error', 'oauth', q.get('error_description') || q.get('error'));
+    history.replaceState(null, '', location.pathname);
+  }
+  stage();
+  renderStatus();
+  renderLog();
+  if (engine && engine.unlocked) { startAuto(); doSync(false); }
+}
+
+init().catch((e) => { events.add('error', 'init', e && e.message ? e.message : e); });
+
+})();
+</script>
+</body>
+</html>
