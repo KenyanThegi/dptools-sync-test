@@ -9,7 +9,7 @@
 <style>
 :root { --bg:#0b0b0c; --panel:#161618; --line:#2a2a2d; --grey:#8d8d92; --text:#c9c9cd; --amber:#ffb000; }
 * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-html, body { margin:0; height:100%; background:var(--bg); color:var(--text); overflow:hidden; overscroll-behavior:none;
+html, body { margin:0; position:fixed; inset:0; width:100%; height:100%; background:var(--bg); color:var(--text); overflow:hidden; overscroll-behavior:none;
   font:12px/1.35 -apple-system, "SF Pro Text", system-ui, sans-serif;
   -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
 #bar { position:fixed; top:0; left:0; right:0; z-index:5; display:flex; flex-wrap:wrap; gap:4px; align-items:center;
@@ -28,7 +28,7 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--text); ove
 #opts div { display:flex; align-items:center; gap:8px; margin:4px 0; color:var(--grey); }
 #opts span.v { color:var(--amber); min-width:34px; }
 #view { position:fixed; inset:0; touch-action:none; background:#050506; }
-#view canvas, #kv, #kv * { touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+#view, #view canvas, #kv, #kv * { -webkit-user-drag:none; -webkit-tap-highlight-color:transparent; touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
 #raw { position:absolute; left:0; top:0; display:block; }
 #kv { position:absolute; left:0; top:0; display:none; }
 #hud { position:fixed; right:6px; bottom:calc(6px + env(safe-area-inset-bottom)); z-index:4; pointer-events:none; white-space:pre;
@@ -70,6 +70,7 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--text); ove
   <button id="b-json">JSON</button>
   <button id="b-hud" class="on">HUD</button>
   <button id="b-info" class="on">Info</button>
+  <button id="b-mark">Mark leak</button>
   <button id="b-report">Copy report</button>
 </div>
 <div id="opts">
@@ -128,7 +129,9 @@ var M = {
   types: {}, penP: { min: Infinity, max: -Infinity, distinct: new Set(), n: 0 },
   tilt: { seen: false, xmin: Infinity, xmax: -Infinity, ymin: Infinity, ymax: -Infinity },
   co: { supported: false, n: 0, sum: 0, max: 0 }, pr: { supported: false, n: 0, sum: 0, max: 0 },
-  largeContacts: 0, rejected: 0, leaks: { scroll: 0, vv: 0, sel: 0 }, lastLeak: { scroll: false, vv: false, sel: false },
+  largeContacts: 0, rejected: 0,
+  leaks: { scroll: 0, vv: 0, vvOffset: 0, vvPage: 0, vvHeight: 0, innerH: 0, sel: 0 }, lastLeak: {}, leakBase: null, leakLog: [], marks: [],
+  hist: [], lastTouch: null, maxFingers: 0,
   strokes: 0, undo: 0, redo: 0, eraserGestures: 0, erasedStrokes: 0, exportPNG: false, exportJSON: false,
   unknown: [], gestures: 0, used: {}, per: {}, rafWin: [], rafLast: 0, frameN: 0, hudAt: 0, log: [], last: null
 };
@@ -179,6 +182,14 @@ function noteEvent(s, kind, co, pr) {
   while (T.times.length > 2 && ts - T.times[0] > 2000) T.times.shift();
   var contact = kind === 'down' || s.pointerId === S.drawId;
   if (kind === 'move' && !contact) T.hover++;
+  var h = M.hist[M.hist.length - 1];
+  if (kind === 'move' && h && h.kind === 'move' && h.pt === t) h.n++;
+  else { M.hist.push({ ts: ts, kind: kind, pt: t, n: 1 }); if (M.hist.length > 20) M.hist.shift(); }
+  if (t === 'touch') {
+    if (kind === 'down') { M.lastTouch = { down: ts, up: null }; M.maxFingers = Math.max(1, S.touches.size + 1); }
+    else if (kind === 'up' && M.lastTouch) M.lastTouch.up = ts;
+    else if (kind === 'move') M.maxFingers = Math.max(M.maxFingers, S.touches.size);
+  }
   M.last = { type: t, p: s.pressure, tx: s.tiltX, ty: s.tiltY, co: co ? co.length : 0, pr: pr ? pr.length : 0 };
   if (t === 'pen' && contact) {
     var p = typeof s.pressure === 'number' ? s.pressure : 0;
@@ -625,14 +636,49 @@ function initKonva() {
 }
 
 // ---------- frame loop ----------
-function leakCheck() {
-  var sc = (window.scrollX || 0) !== 0 || (window.scrollY || 0) !== 0 || (document.scrollingElement && document.scrollingElement.scrollTop !== 0);
-  var vv = !!(window.visualViewport && Math.abs(window.visualViewport.scale - 1) > 0.01);
-  var sel = !!(window.getSelection && String(window.getSelection()).length > 0);
-  if (sc && !M.lastLeak.scroll) M.leaks.scroll++;
-  if (vv && !M.lastLeak.vv) M.leaks.vv++;
-  if (sel && !M.lastLeak.sel) M.leaks.sel++;
-  M.lastLeak = { scroll: sc, vv: vv, sel: sel };
+function vvNow() {
+  var v = window.visualViewport;
+  return { scale: v ? v.scale : 1, offTop: v ? v.offsetTop : 0, offLeft: v ? v.offsetLeft : 0, pageTop: v ? v.pageTop : 0, pageLeft: v ? v.pageLeft : 0,
+    height: v ? v.height : null, innerH: window.innerHeight, has: !!v };
+}
+function viewportString() {
+  var n = vvNow(), de = document.scrollingElement;
+  return 'vv.scale=' + n.scale + ' vv.offset=' + n.offTop + ',' + n.offLeft + ' vv.page=' + n.pageTop + ',' + n.pageLeft + ' vv.height=' + n.height +
+    ' innerH=' + n.innerH + ' scrollY=' + (window.scrollY || 0) + ' scrollTop=' + (de ? de.scrollTop : 0);
+}
+function leakLine(kind, ts) {
+  var line = f1(ts) + ' ms LEAK ' + kind + ' engine=' + S.engine + ' lastPointerType=' + (M.last ? M.last.type : 'none') +
+    ' penDown=' + (S.penId != null ? 'y' : 'n') + ' touchDown=' + (S.touches.size ? S.touches.size : 'n') + ' | ' + viewportString();
+  if (M.leakLog.length < 200) M.leakLog.push(line);
+  log('LEAK ' + kind);
+}
+// sampled on every rAF (not only during strokes): the counters see what the page can see; Mark leak covers the rest
+function leakCheck(ts) {
+  var n = vvNow(), de = document.scrollingElement;
+  if (!M.leakBase) M.leakBase = { vvHeight: n.height, innerH: n.innerH };
+  if (M.leakBase.vvHeight == null && n.has) M.leakBase.vvHeight = n.height;
+  var cur = {
+    scroll: (window.scrollX || 0) !== 0 || (window.scrollY || 0) !== 0 || !!(de && (de.scrollTop !== 0 || de.scrollLeft !== 0)),
+    vv: Math.abs(n.scale - 1) > 0.01,
+    vvOffset: n.offTop !== 0 || n.offLeft !== 0,
+    vvPage: n.pageTop !== 0 || n.pageLeft !== 0,
+    vvHeight: n.has && M.leakBase.vvHeight != null && Math.abs(n.height - M.leakBase.vvHeight) > 1,
+    innerH: Math.abs(n.innerH - M.leakBase.innerH) > 1,
+    sel: !!(window.getSelection && String(window.getSelection()).length > 0)
+  };
+  Object.keys(cur).forEach(function (k) {
+    if (cur[k] && !M.lastLeak[k]) { M.leaks[k]++; leakLine(k, ts || 0); }
+    M.lastLeak[k] = cur[k];
+  });
+}
+function markLeak() {
+  var now = (window.performance && performance.now) ? performance.now() : 0;
+  var ev = M.hist.map(function (h) { return h.kind + ':' + h.pt + (h.n > 1 ? 'x' + h.n : ''); }).join(' ');
+  var lt = M.lastTouch ? f1((M.lastTouch.up != null ? M.lastTouch.up : (M.hist.length ? M.hist[M.hist.length - 1].ts : M.lastTouch.down)) - M.lastTouch.down) + ' ms' + (M.lastTouch.up == null ? ' (still down or no up seen)' : '') : 'no touch yet';
+  var m = new Date().toISOString() + ' (t=' + f1(now) + ' ms) engine=' + S.engine + ' | last touch duration ' + lt + ', max fingers ' + M.maxFingers +
+    ', fingers now ' + S.touches.size + ', pen down ' + (S.penId != null ? 'y' : 'n') + ' | ' + viewportString() + ' | last events: ' + (ev || 'none');
+  M.marks.push(m); log('leak marked (#' + M.marks.length + ')');
+  return m;
 }
 function frame(ts) {
   if (M.rafLast) {
@@ -654,7 +700,7 @@ function frame(ts) {
     var lat = ts - S.pendingTs, lk = S.pendingKind || 'drawing'; S.pendingTs = null;
     if (lat >= 0 && M.per[S.engine].lat[lk].length < 20000) M.per[S.engine].lat[lk].push(lat);
   }
-  if ((++M.frameN % 20) === 0) leakCheck();
+  M.frameN++; leakCheck(ts);
   if (ts - M.hudAt > 250) { M.hudAt = ts; updateHud(ts); }
 }
 function loop(ts) { frame(ts); if (!S.stopped) requestAnimationFrame(loop); }
@@ -750,8 +796,9 @@ var REPORT_LABELS = ['date', 'userAgent', 'platform', 'maxTouchPoints', 'deviceP
   .concat(['raw', 'raw-pf', 'konva-frame', 'konva-pointer'].reduce(function (a, e) {
     return a.concat(['frame time ' + e + ' drawing', 'frame time ' + e + ' panning', 'latency estimate ' + e + ' drawing', 'latency estimate ' + e + ' panning']);
   }, []))
-  .concat(['large contacts (kept, logged only)', 'touches rejected during pen strokes', 'leaked scroll offset changed', 'leaked visualViewport scale changed',
-  'leaked selection non-empty', 'strokes drawn', 'strokes on canvas at end', 'undo count', 'eraser uses', 'export PNG done', 'export JSON done', 'unknown events', 'gesture events']);
+  .concat(['large contacts (kept, logged only)', 'touches rejected during pen strokes', 'leaked scroll offset changed', 'leaked visualViewport scale changed', 'leaked visualViewport offset changed',
+  'leaked visualViewport page offset changed', 'leaked visualViewport height changed', 'leaked innerHeight changed',
+  'leaked selection non-empty', 'marked leaks', 'undo tested', 'strokes drawn', 'strokes on canvas at end', 'undo count', 'eraser uses', 'export PNG done', 'export JSON done', 'unknown events', 'gesture events']);
 function range(a, b) { return isFinite(a) ? f1(a) + ' .. ' + f1(b) : 'n/a'; }
 function buildReport() {
   var L = [], put = function (k, v) { L.push(k + ': ' + v); };
@@ -799,7 +846,15 @@ function buildReport() {
   put('touches rejected during pen strokes', M.rejected);
   put('leaked scroll offset changed', M.leaks.scroll);
   put('leaked visualViewport scale changed', M.leaks.vv);
+  put('leaked visualViewport offset changed', M.leaks.vvOffset);
+  put('leaked visualViewport page offset changed', M.leaks.vvPage);
+  put('leaked visualViewport height changed', M.leaks.vvHeight);
+  put('leaked innerHeight changed', M.leaks.innerH);
   put('leaked selection non-empty', M.leaks.sel);
+  put('marked leaks', M.marks.length);
+  M.marks.forEach(function (m, i) { L.push('  mark ' + (i + 1) + ': ' + m); });
+  M.leakLog.forEach(function (m, i) { L.push('  leak log ' + (i + 1) + ': ' + m); });
+  put('undo tested', M.undo > 0 ? 'yes (' + M.undo + ' undo)' : 'NO: tap Undo once and press Cmd/Ctrl-Z before copying the report');
   put('strokes drawn', M.strokes + ' (' + ENGINES.map(function (e) { return e + '=' + M.per[e].strokes; }).join(', ') + ')');
   put('strokes on canvas at end', S.strokes.length);
   put('undo count', M.undo);
@@ -832,6 +887,7 @@ function copyReport() {
 }
 
 // ---------- boot ----------
+function inReport(t) { var b = document.getElementById('repbox'); return !!(b && t && b.contains && b.contains(t)); }
 function wire() {
   rawCanvas = $('raw'); rawCtx = rawCanvas.getContext('2d');
   var host = $('view');
@@ -851,6 +907,11 @@ function wire() {
     host.addEventListener(n, function (ev) { if (n.indexOf('gesture') === 0) M.gestures++; ev.preventDefault(); }, { passive: false });
   });
   host.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+  ['touchend', 'touchcancel', 'selectstart', 'dragstart'].forEach(function (n) {
+    host.addEventListener(n, function (ev) { ev.preventDefault(); }, { passive: false });
+  });
+  document.addEventListener('selectstart', function (ev) { if (!inReport(ev.target)) ev.preventDefault(); }, { passive: false });
+  document.addEventListener('touchmove', function (ev) { if (!inReport(ev.target)) ev.preventDefault(); }, { passive: false });
   document.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
   host.addEventListener('wheel', function (ev) {
     ev.preventDefault();
@@ -896,6 +957,7 @@ function wire() {
   $('b-png').addEventListener('click', exportPNG); $('b-json').addEventListener('click', exportJSON);
   $('b-hud').addEventListener('click', function (e) { S.hud = !S.hud; e.target.classList.toggle('on', S.hud); updateHud(performance.now()); });
   $('b-info').addEventListener('click', function (e) { var f = $('foot'); f.classList.toggle('hidden'); e.target.classList.toggle('on', !f.classList.contains('hidden')); });
+  $('b-mark').addEventListener('click', markLeak);
   $('b-report').addEventListener('click', copyReport);
   $('repbox').addEventListener('click', function (e) { if (e.target === $('repbox')) $('repbox').classList.remove('show'); });
 }
@@ -908,7 +970,7 @@ setEngine('raw');
 
 window.PencilTest = {
   S: S, M: M, K: K, ENGINES: ENGINES, REPORT_LABELS: REPORT_LABELS, LARGE_CONTACT_MIN: LARGE_CONTACT_MIN, COUNTERS: COUNTERS, bake: bake,
-  down: down, move: move, up: up, undo: undo, redo: redo, eraseAt: eraseAt,
+  markLeak: markLeak, leakCheck: leakCheck, down: down, move: move, up: up, undo: undo, redo: redo, eraseAt: eraseAt,
   widthFor: widthFor, toImage: toImage, setEngine: setEngine, fit: fit, resize: resize,
   exportData: exportData, exportJSON: exportJSON, exportPNG: exportPNG, buildReport: buildReport, copyReport: copyReport,
   pfOutline: pfOutline, setBackground: setBackground, makeTestFrame: makeTestFrame, frame: frame,
