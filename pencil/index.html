@@ -33,6 +33,8 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--text); ove
 #kv { position:absolute; left:0; top:0; display:none; }
 #hud { position:fixed; right:6px; bottom:calc(6px + env(safe-area-inset-bottom)); z-index:4; pointer-events:none; white-space:pre;
   font:11px/1.35 ui-monospace, Menlo, monospace; color:var(--amber); background:rgba(11,11,12,.8); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+#hud-raf { font:700 30px/1.1 -apple-system, system-ui, sans-serif; color:var(--amber); }
+#hud-hint { font:10px/1.3 -apple-system, system-ui, sans-serif; color:var(--grey); white-space:normal; max-width:260px; margin:2px 0 4px; }
 #foot { position:fixed; left:6px; bottom:calc(6px + env(safe-area-inset-bottom)); z-index:4; max-width:46vw; pointer-events:none; color:var(--grey);
   background:rgba(11,11,12,.8); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11px; }
 #repbox { position:fixed; inset:60px 20px 20px 20px; z-index:9; display:none; }
@@ -77,9 +79,9 @@ html, body { margin:0; height:100%; background:var(--bg); color:var(--text); ove
   <div><label class="chk"><input type="checkbox" id="c-ftm"> Konva-Frame: also wire touchmove (variant)</label></div>
 </div>
 <div id="view"><canvas id="raw"></canvas><div id="kv"></div></div>
-<div id="hud"></div>
+<div id="hud"><div id="hud-raf"></div><div id="hud-hint"></div><div id="hud-body"></div></div>
 <div id="foot">
-  Pen draws, one finger pans, two fingers pinch-zoom. Palm rejection: touches are ignored while a pen stroke is active.<br>
+  Pen draws, one finger pans, two fingers pinch-zoom. Touches are ignored only while a pen is down (palm rejection); touch size never rejects.<br>
   Pencil double-tap is not exposed to web pages (PencilKit only).<br>
   120 Hz: iOS Safari may cap rAF at 60 Hz (Settings &gt; Apps &gt; Safari &gt; Advanced &gt; Feature Flags &gt; "Prefer Page Rendering Updates near 60fps"). The HUD rAF rate shows the truth.
 </div>
@@ -106,7 +108,8 @@ Object.defineProperties(exports,{__esModule:{value:!0},[Symbol.toStringTag]:{val
 'use strict';
 
 var KONVA_SHA = '4655b6cd12d0d2ee5f6d461fa98c3611b1f9979b9106f18221bf0e6a90ab6745', PF_SHA = '986865269438ec8fb5f5ab4c17ea743d57206c9da891523c045d88ae1dc5a33e', PF_VERSION = '1.2.3';
-var PALM_MIN = 50;          // CSS px contact size from which a touch counts as palm candidate
+var LARGE_CONTACT_MIN = 50; // CSS px: touches this big are only COUNTED as large contacts, never rejected
+var PEN_STALE_MS = 500;     // no pen event for this long clears the pen-active flag
 var ERASE_RADIUS_PX = 10;
 var ENGINES = ['raw', 'raw-pf', 'konva-frame', 'konva-pointer'];
 var $ = function (id) { return document.getElementById(id); };
@@ -118,18 +121,19 @@ var S = {
   view: { x: 0, y: 0, scale: 1 },
   bg: null, strokes: [], current: null, predicted: [],
   undoStack: [], redoStack: [], rev: 0, dirty: true,
-  penId: null, drawId: null, drawType: null, touches: new Map(), eraseBatch: null,
+  penId: null, penLast: 0, drawId: null, drawType: null, touches: new Map(), eraseBatch: null,
   nextId: 1, pendingTs: null, stopped: false, W: 0, H: 0
 };
 var M = {
   types: {}, penP: { min: Infinity, max: -Infinity, distinct: new Set(), n: 0 },
   tilt: { seen: false, xmin: Infinity, xmax: -Infinity, ymin: Infinity, ymax: -Infinity },
   co: { supported: false, n: 0, sum: 0, max: 0 }, pr: { supported: false, n: 0, sum: 0, max: 0 },
-  palm: 0, rejected: 0, leaks: { scroll: 0, vv: 0, sel: 0 }, lastLeak: { scroll: false, vv: false, sel: false },
+  largeContacts: 0, rejected: 0, leaks: { scroll: 0, vv: 0, sel: 0 }, lastLeak: { scroll: false, vv: false, sel: false },
   strokes: 0, undo: 0, redo: 0, eraserGestures: 0, erasedStrokes: 0, exportPNG: false, exportJSON: false,
   unknown: [], gestures: 0, used: {}, per: {}, rafWin: [], rafLast: 0, frameN: 0, hudAt: 0, log: [], last: null
 };
-ENGINES.forEach(function (e) { M.per[e] = { frames: [], lat: [], strokes: 0 }; });
+ENGINES.forEach(function (e) { M.per[e] = { frames: { drawing: [], panning: [] }, lat: { drawing: [], panning: [] }, strokes: 0 }; });
+var COUNTERS = { paint: 0, outline: 0, rebakes: 0, bakeAdds: 0, konvaLines: 0, konvaStaticDraws: 0, konvaLiveDraws: 0, konvaCaches: 0 };
 M.used[S.engine] = true;
 
 function log(s) { M.log.push(s); if (M.log.length > 40) M.log.shift(); }
@@ -259,7 +263,10 @@ function finishDraw() {
   if (S.current) {
     var st = S.current; S.current = null; S.predicted = [];
     S.strokes.push(st); pushAction({ type: 'add', stroke: st });
-    M.strokes++; M.per[S.engine].strokes++; bump();
+    M.strokes++; M.per[S.engine].strokes++;
+    // committed incrementally: no full rebuild, the stroke is painted once into the baked layer
+    if (S.engine === 'raw' || S.engine === 'raw-pf') bake.add.push(st); else K.add.push(st);
+    S.dirty = true;
   }
   if (S.eraseBatch) {
     if (S.eraseBatch.length) { pushAction({ type: 'erase', items: S.eraseBatch }); M.eraserGestures++; M.erasedStrokes += S.eraseBatch.length; }
@@ -267,21 +274,24 @@ function finishDraw() {
   }
   S.drawId = null; S.drawType = null; S.pendingTs = null; S.dirty = true;
 }
+function clearPen() { S.penId = null; }
 function down(s) {
   noteEvent(s, 'down');
   var t = s.pointerType;
+  // a pen flag that went stale (lost pointerup) must never block touch for long
+  if (S.penId != null && (s.t || 0) - S.penLast > PEN_STALE_MS && t !== 'pen') clearPen();
   if (t === 'touch') {
-    var big = (s.width >= PALM_MIN || s.height >= PALM_MIN);
-    if (big) { M.palm++; log('palm candidate ' + Math.round(s.width) + 'x' + Math.round(s.height)); }
+    // contact size NEVER rejects; large contacts are only counted
+    if (s.width >= LARGE_CONTACT_MIN || s.height >= LARGE_CONTACT_MIN) { M.largeContacts++; log('large contact ' + Math.round(s.width) + 'x' + Math.round(s.height) + ' (kept)'); }
+    // the only rejection: a touch while a pen pointer is down
     if (S.penId != null) { M.rejected++; return 'rejected'; }
-    if (big) return 'palm';
     if (S.fingerDraws) return S.drawId == null ? beginDraw(s) : 'ignored';
     S.touches.set(s.pointerId, { x: s.clientX, y: s.clientY });
     return 'pan';
   }
   if (t === 'pen' || t === 'mouse') {
     if (S.drawId != null && S.drawId !== s.pointerId) finishDraw();
-    if (t === 'pen') { S.penId = s.pointerId; S.touches.clear(); }
+    if (t === 'pen') { S.penId = s.pointerId; S.penLast = s.t || 0; S.touches.clear(); }
     return beginDraw(s);
   }
   M.unknown.push('pointerType=' + t); log('unknown pointerType ' + t);
@@ -303,10 +313,12 @@ function panPinch(s) {
     var ix = (c0.x - r.left - v.x) / v.scale, iy = (c0.y - r.top - v.y) / v.scale;
     v.scale = ns; v.x = c1.x - r.left - ix * ns; v.y = c1.y - r.top - iy * ns;
   }
+  if (S.pendingTs == null) { S.pendingTs = s.t || 0; S.pendingKind = 'panning'; }
   S.dirty = true;
 }
 function move(s, co, pr) {
   noteEvent(s, 'move', co, pr);
+  if (s.pointerType === 'pen' && s.pointerId === S.penId) S.penLast = s.t || 0;
   if (S.touches.has(s.pointerId)) { panPinch(s); return 'pan'; }
   if (s.pointerId === S.drawId) {
     var list = (co && co.length) ? co : [s];
@@ -317,7 +329,7 @@ function move(s, co, pr) {
     if (S.current) {
       list.forEach(function (c) { S.current.points.push(toPoint(c, S.current.t0)); });
       S.predicted = (pr || []).map(function (c) { return toPoint(c, S.current.t0); }); // transient, never stored
-      if (S.pendingTs == null) S.pendingTs = s.t || 0;
+      if (S.pendingTs == null) { S.pendingTs = s.t || 0; S.pendingKind = 'drawing'; }
       S.dirty = true;
       return 'draw';
     }
@@ -326,10 +338,10 @@ function move(s, co, pr) {
 }
 function up(s) {
   noteEvent(s, 'up');
-  if (S.touches.has(s.pointerId)) { S.touches.delete(s.pointerId); return 'pan-end'; }
+  if (S.touches.has(s.pointerId)) { S.touches.delete(s.pointerId); S.dirty = true; return 'pan-end'; }
   var r = 'none';
   if (s.pointerId === S.drawId) { finishDraw(); r = 'end'; }
-  if (s.pointerId === S.penId) S.penId = null;
+  if (s.pointerId === S.penId) clearPen();
   return r;
 }
 
@@ -442,8 +454,26 @@ function pfOutline(st) {
   var input = st.points.map(function (p) { return [p.x, p.y, p.p]; });
   return PF.getStroke(input, pfOptions(st));
 }
-function paintPF(ctx, st) {
-  var o = pfOutline(st); if (!o.length) return paintRaw(ctx, st);
+function pfPath(st) { // cached Path2D for FINISHED strokes (never for the live one)
+  var key = st.points.length + '|' + st.width.min + '|' + st.width.max + '|' + st.width.exp + '|' + st.wscale;
+  if (st._pk === key && st._p2d) return st._p2d;
+  var o = pfOutline(st); COUNTERS.outline++;
+  if (!o.length) return null;
+  var path = new Path2D();
+  path.moveTo(o[0][0], o[0][1]);
+  for (var i = 0; i < o.length; i++) {
+    var a = o[i], b = o[(i + 1) % o.length];
+    path.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+  }
+  path.closePath(); st._pk = key; st._p2d = path; return path;
+}
+function paintPF(ctx, st, live) {
+  if (!live && typeof Path2D === 'function') {
+    var pp = pfPath(st); if (!pp) return paintRaw(ctx, st);
+    ctx.fillStyle = st.color; ctx.fill(pp); return;
+  }
+  var o = pfOutline(st); COUNTERS.outline++;
+  if (!o.length) return paintRaw(ctx, st);
   ctx.fillStyle = st.color; ctx.beginPath();
   ctx.moveTo(o[0][0], o[0][1]);
   for (var i = 0; i < o.length; i++) {
@@ -452,7 +482,7 @@ function paintPF(ctx, st) {
   }
   ctx.closePath(); ctx.fill();
 }
-function paintStroke(ctx, st, mode) { (mode === 'pf' ? paintPF : paintRaw)(ctx, st); }
+function paintStroke(ctx, st, mode, live) { COUNTERS.paint++; (mode === 'pf' ? paintPF : paintRaw)(ctx, st, live); }
 function paintTail(ctx, st, pred) {
   if (!st || !pred.length) return;
   var last = st.points[st.points.length - 1];
@@ -464,56 +494,118 @@ function paintTail(ctx, st, pred) {
 }
 
 var rawCanvas, rawCtx;
-function renderRaw() {
+// Committed layer: finished strokes (and the background) are baked into an offscreen canvas at VIEW resolution
+// (device pixels of the visible canvas). Each frame draws that bitmap once, plus the live stroke and predicted tail.
+// During pan/zoom the bitmap is only transformed; it is re-rendered sharp when the gesture ends.
+var bake = { canvas: null, ctx: null, view: null, full: true, add: [], rev: -1, bgRev: -1, mode: null };
+function sameView(a, b) { return !!a && a.x === b.x && a.y === b.y && a.scale === b.scale; }
+function ensureBake() {
+  if (!bake.canvas) { bake.canvas = document.createElement('canvas'); bake.ctx = bake.canvas.getContext('2d'); bake.full = true; }
+  if (bake.canvas.width !== rawCanvas.width || bake.canvas.height !== rawCanvas.height) {
+    bake.canvas.width = rawCanvas.width; bake.canvas.height = rawCanvas.height; bake.full = true;
+  }
+}
+function rebake(mode) {
+  var dpr = window.devicePixelRatio || 1, v = S.view, g = bake.ctx;
+  g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = '#050506'; g.fillRect(0, 0, bake.canvas.width, bake.canvas.height);
+  g.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.x, dpr * v.y);
+  if (S.bg) g.drawImage(S.bg.canvas || S.bg.img, 0, 0, S.bg.w, S.bg.h);
+  S.strokes.forEach(function (st) { paintStroke(g, st, mode, false); });
+  bake.view = { x: v.x, y: v.y, scale: v.scale }; bake.full = false; bake.add.length = 0;
+  bake.rev = S.rev; bake.bgRev = S.bgRevCounter; bake.mode = mode; COUNTERS.rebakes++;
+}
+function isGesture(ts) { return S.touches.size > 0 || (S.wheelUntil || 0) > ts; }
+function renderRaw(ts) {
   var dpr = window.devicePixelRatio || 1, v = S.view, ctx = rawCtx, mode = S.engine === 'raw-pf' ? 'pf' : 'raw';
+  ensureBake();
+  if (bake.rev !== S.rev || bake.bgRev !== S.bgRevCounter || bake.mode !== mode) bake.full = true; // undo/redo/erase/bg/mode: rebuild once
+  var gesture = isGesture(ts), same = sameView(bake.view, v);
+  if (!bake.view) { rebake(mode); same = true; }
+  else if (!gesture) {
+    if (bake.full || !same) { rebake(mode); same = true; }
+    else if (bake.add.length) {
+      var g = bake.ctx, bv = bake.view;
+      g.setTransform(dpr * bv.scale, 0, 0, dpr * bv.scale, dpr * bv.x, dpr * bv.y);
+      bake.add.forEach(function (st) { paintStroke(g, st, mode, false); COUNTERS.bakeAdds++; });
+      bake.add.length = 0;
+    }
+  }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = '#050506'; ctx.fillRect(0, 0, rawCanvas.width, rawCanvas.height);
+  if (same) ctx.drawImage(bake.canvas, 0, 0);
+  else { // gesture in progress: transform the stale bitmap
+    var k = v.scale / bake.view.scale;
+    ctx.fillStyle = '#050506'; ctx.fillRect(0, 0, rawCanvas.width, rawCanvas.height);
+    ctx.setTransform(k, 0, 0, k, dpr * (v.x - bake.view.x * k), dpr * (v.y - bake.view.y * k));
+    ctx.drawImage(bake.canvas, 0, 0);
+  }
   ctx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.x, dpr * v.y);
-  if (S.bg) ctx.drawImage(S.bg.canvas || S.bg.img, 0, 0, S.bg.w, S.bg.h);
-  S.strokes.forEach(function (st) { paintStroke(ctx, st, mode); });
-  if (S.current) { paintStroke(ctx, S.current, mode); paintTail(ctx, S.current, S.predicted); }
+  if (S.current) { paintStroke(ctx, S.current, mode, true); paintTail(ctx, S.current, S.predicted); }
 }
 
 // ---------- Konva (engines konva-frame / konva-pointer) ----------
-var K = { stage: null, bgLayer: null, strokeLayer: null, bgRev: -1, rev: -1, live: null, tail: null, ok: false };
+var K = { stage: null, bgLayer: null, strokeLayer: null, liveLayer: null, bgRev: -1, rev: -1, live: null, tail: null, ok: false,
+  add: [], viewKey: null, hasCache: false, cacheScale: 0, wasLive: false };
 function flat(st) { var a = []; st.points.forEach(function (p) { a.push(p.x, p.y); }); return a; }
 function konvaWidth(st) {
   var s = 0; st.points.forEach(function (p) { s += p.p; });
   return widthFor(st.points.length ? s / st.points.length : 0.5, st.width) * st.wscale;
 }
 function newLine(st) {
+  COUNTERS.konvaLines++;
   return new Konva.Line({ points: flat(st), stroke: st.color, strokeWidth: konvaWidth(st), lineCap: 'round', lineJoin: 'round', tension: 0.4, listening: false });
 }
-function renderKonva() {
-  var v = S.view;
-  K.stage.position({ x: v.x, y: v.y }); K.stage.scale({ x: v.scale, y: v.scale });
+// Finished strokes live on strokeLayer, which is cached to a bitmap (image-space rect of the background). During a
+// pan/zoom gesture Konva only transforms that bitmap; it is re-cached sharp at gesture end. Strokes outside the
+// background rectangle are not part of the cache (documented limitation of this test).
+function recache() {
+  K.strokeLayer.clearCache(); K.hasCache = false;
+  if (!K.strokeLayer.getChildren().length || !S.bg) return;
+  try {
+    var dpr = window.devicePixelRatio || 1, pr = Math.min(dpr * S.view.scale, Math.sqrt(16e6 / (S.bg.w * S.bg.h)));
+    K.strokeLayer.cache({ x: 0, y: 0, width: S.bg.w, height: S.bg.h, pixelRatio: Math.max(0.05, pr) });
+    K.hasCache = true; K.cacheScale = S.view.scale; COUNTERS.konvaCaches++;
+  } catch (e) { K.hasCache = false; log('konva cache failed: ' + e.message); }
+}
+function renderKonva(ts) {
+  var v = S.view, key = v.x + ',' + v.y + ',' + v.scale, viewChanged = key !== K.viewKey, staticDirty = viewChanged;
+  if (viewChanged) { K.stage.position({ x: v.x, y: v.y }); K.stage.scale({ x: v.scale, y: v.scale }); K.viewKey = key; }
   if (K.bgRev !== S.bgRevCounter) {
     K.bgLayer.destroyChildren();
     if (S.bg) K.bgLayer.add(new Konva.Image({ image: S.bg.canvas || S.bg.img, width: S.bg.w, height: S.bg.h, listening: false }));
-    K.bgRev = S.bgRevCounter;
+    K.bgRev = S.bgRevCounter; staticDirty = true;
   }
-  if (K.rev !== S.rev) {
-    K.strokeLayer.destroyChildren(); K.live = null; K.tail = null;
+  if (K.rev !== S.rev) { // undo/redo/erase: rebuild the static layer once
+    K.strokeLayer.clearCache(); K.strokeLayer.destroyChildren();
     S.strokes.forEach(function (st) { K.strokeLayer.add(newLine(st)); });
-    K.rev = S.rev;
+    K.rev = S.rev; K.add.length = 0; recache(); staticDirty = true;
+  } else if (K.add.length) { // a finished stroke: add one line, re-cache
+    K.strokeLayer.clearCache();
+    K.add.forEach(function (st) { K.strokeLayer.add(newLine(st)); });
+    K.add.length = 0; recache(); staticDirty = true;
+  } else if (!isGesture(ts) && K.hasCache && Math.abs(K.cacheScale - v.scale) > 1e-6) { // gesture over: sharp again
+    recache(); staticDirty = true;
   }
-  if (S.current) {
-    if (!K.live || K.live.getAttr('sid') !== S.current.id) { K.live = newLine(S.current); K.live.setAttr('sid', S.current.id); K.strokeLayer.add(K.live); }
+  if (staticDirty) { K.bgLayer.draw(); K.strokeLayer.draw(); COUNTERS.konvaStaticDraws++; }
+  var liveNow = !!S.current;
+  if (liveNow) {
+    if (!K.live || K.live.getAttr('sid') !== S.current.id) { K.live = newLine(S.current); K.live.setAttr('sid', S.current.id); K.liveLayer.add(K.live); }
     K.live.points(flat(S.current)); K.live.strokeWidth(konvaWidth(S.current));
     if (S.predicted.length) {
       var last = S.current.points[S.current.points.length - 1], a = [last.x, last.y];
       S.predicted.forEach(function (p) { a.push(p.x, p.y); });
-      if (!K.tail) { K.tail = new Konva.Line({ stroke: S.current.color, opacity: 0.5, dash: [3, 3], listening: false }); K.strokeLayer.add(K.tail); }
+      if (!K.tail) { K.tail = new Konva.Line({ stroke: S.current.color, opacity: 0.5, dash: [3, 3], listening: false }); K.liveLayer.add(K.tail); }
       K.tail.points(a); K.tail.strokeWidth(konvaWidth(S.current));
     } else if (K.tail) { K.tail.destroy(); K.tail = null; }
   } else if (K.live) { K.live.destroy(); K.live = null; if (K.tail) { K.tail.destroy(); K.tail = null; } }
-  K.stage.draw();
+  if (liveNow || K.wasLive || viewChanged || staticDirty) { K.liveLayer.draw(); COUNTERS.konvaLiveDraws++; } // only the live layer on ordinary frames
+  K.wasLive = liveNow;
 }
 function initKonva() {
   if (!window.Konva) return;
   var stage = new Konva.Stage({ container: 'kv', width: S.W || 800, height: S.H || 600 });
   K.stage = stage; K.bgLayer = new Konva.Layer({ listening: false }); K.strokeLayer = new Konva.Layer({ listening: false });
-  stage.add(K.bgLayer); stage.add(new Konva.Layer({ listening: true })); stage.add(K.strokeLayer);
+  K.liveLayer = new Konva.Layer({ listening: false });
+  stage.add(K.bgLayer); stage.add(new Konva.Layer({ listening: true })); stage.add(K.strokeLayer); stage.add(K.liveLayer);
   K.ok = true;
   var isFrame = function () { return S.engine === 'konva-frame'; };
   var isPtr = function () { return S.engine === 'konva-pointer'; };
@@ -547,16 +639,20 @@ function frame(ts) {
     var dt = ts - M.rafLast;
     M.rafWin.push([ts, dt]);
     while (M.rafWin.length && ts - M.rafWin[0][0] > 2000) M.rafWin.shift();
-    if ((S.drawId != null || S.touches.size) && M.per[S.engine].frames.length < 20000) M.per[S.engine].frames.push(dt);
+    var kind = S.drawId != null ? 'drawing' : (S.touches.size ? 'panning' : null);
+    if (kind && M.per[S.engine].frames[kind].length < 20000) M.per[S.engine].frames[kind].push(dt);
   }
   M.rafLast = ts;
+  var gest = isGesture(ts);
+  if (S.wasGesture && !gest) S.dirty = true; // gesture just ended: re-render sharp
+  S.wasGesture = gest;
   if (S.dirty) {
     S.dirty = false;
-    if (S.engine === 'raw' || S.engine === 'raw-pf') renderRaw(); else if (K.ok) renderKonva();
+    if (S.engine === 'raw' || S.engine === 'raw-pf') renderRaw(ts); else if (K.ok) renderKonva(ts);
   }
   if (S.pendingTs != null) {
-    var lat = ts - S.pendingTs; S.pendingTs = null;
-    if (lat >= 0 && M.per[S.engine].lat.length < 20000) M.per[S.engine].lat.push(lat);
+    var lat = ts - S.pendingTs, lk = S.pendingKind || 'drawing'; S.pendingTs = null;
+    if (lat >= 0 && M.per[S.engine].lat[lk].length < 20000) M.per[S.engine].lat[lk].push(lat);
   }
   if ((++M.frameN % 20) === 0) leakCheck();
   if (ts - M.hudAt > 250) { M.hudAt = ts; updateHud(ts); }
@@ -569,18 +665,20 @@ function rafHz() {
 }
 function updateHud(now) {
   var h = $('hud'); if (!S.hud) { h.classList.add('hidden'); return; } h.classList.remove('hidden');
-  var win = stats(M.rafWin.map(function (x) { return x[1]; })), L = M.last;
-  var lat = stats(M.per[S.engine].lat.slice(-120));
+  var win = stats(M.rafWin.map(function (x) { return x[1]; })), L = M.last, hz = rafHz();
+  var lat = stats(M.per[S.engine].lat.drawing.slice(-120));
+  $('hud-raf').textContent = 'rAF ' + (hz ? Math.round(hz) : '--') + ' Hz';
+  $('hud-hint').textContent = (hz && hz > 90) ? '' : 'For a 120 Hz run in Safari: switch off "Prefer Page Rendering Updates near 60fps" (Settings > Apps > Safari > Advanced > Feature Flags). That flag applies to Safari only; other browsers on iPad may stay at 60.';
   var lines = [
     'engine ' + S.engine + '  tool ' + S.tool + '  scale ' + f1(S.view.scale),
     'last ' + (L ? L.type + '  p=' + (typeof L.p === 'number' ? L.p.toFixed(3) : 'n/a') + '  tilt=' + Math.round(L.tx || 0) + ',' + Math.round(L.ty || 0) : 'no events yet'),
     'coalesced ' + (L ? L.co : 0) + '  predicted ' + (L ? L.pr : 0),
     'rate  pen ' + f1(liveHz('pen', now)) + '  touch ' + f1(liveHz('touch', now)) + '  mouse ' + f1(liveHz('mouse', now)) + ' Hz',
-    'rAF ' + f1(rafHz()) + ' Hz  frame avg ' + f1(win && win.avg) + ' p95 ' + f1(win && win.p95) + ' worst ' + f1(win && win.worst) + ' ms',
+    'frame avg ' + f1(win && win.avg) + ' p95 ' + f1(win && win.p95) + ' worst ' + f1(win && win.worst) + ' ms (2 s)',
     'latency (estimate) ' + f1(lat && lat.avg) + ' ms avg',
-    'strokes ' + S.strokes.length + '  palm ' + M.palm + '  rejected ' + M.rejected
+    'strokes ' + S.strokes.length + '  large contacts ' + M.largeContacts + '  rejected ' + M.rejected
   ].concat(M.log.slice(-3));
-  h.textContent = lines.join('\n');
+  $('hud-body').textContent = lines.join('\n');
 }
 
 // ---------- engine / view plumbing ----------
@@ -589,10 +687,11 @@ function setEngine(name) {
   if (S.drawId != null) finishDraw();
   S.penId = null; S.touches.clear();
   S.engine = name; M.used[name] = true;
+  bake.full = true; bake.add.length = 0; K.add.length = 0; K.viewKey = null;
   var rawOn = name === 'raw' || name === 'raw-pf';
   $('raw').style.display = rawOn ? 'block' : 'none';
   $('kv').style.display = rawOn ? 'none' : 'block';
-  if (!rawOn) { K.rev = -1; K.bgRev = -1; }
+  K.rev = -1; K.bgRev = -1;
   Array.prototype.forEach.call(document.querySelectorAll('[data-engine]'), function (b) { b.classList.toggle('on', b.dataset.engine === name); });
   S.dirty = true; return true;
 }
@@ -644,21 +743,22 @@ function exportPNG() {
 }
 
 // ---------- report ----------
-var REPORT_LABELS = ['date', 'userAgent', 'platform', 'maxTouchPoints', 'devicePixelRatio', 'screen size', 'viewport size', 'WKWebView guess',
+var REPORT_LABELS = ['date', 'userAgent', 'platform', 'maxTouchPoints', 'devicePixelRatio', 'screen size', 'viewport size', 'device', 'engine', 'host', 'WKWebView guess',
   'engines used', 'perfect-freehand', 'konva', 'pointerTypes seen', 'pen pressure min', 'pen pressure max', 'pen pressure distinct values',
   'tilt seen', 'tiltX range', 'tiltY range', 'getCoalescedEvents supported', 'coalesced per event avg/max', 'getPredictedEvents supported',
-  'predicted per event avg', 'pen event rate', 'rAF rate', 'frame time raw', 'frame time raw-pf', 'frame time konva-frame', 'frame time konva-pointer',
-  'latency estimate raw', 'latency estimate raw-pf', 'latency estimate konva-frame', 'latency estimate konva-pointer', 'palm candidates',
-  'touches rejected during pen strokes', 'leaked scroll offset changed', 'leaked visualViewport scale changed', 'leaked selection non-empty',
-  'strokes drawn', 'undo count', 'eraser uses', 'export PNG done', 'export JSON done', 'unknown events', 'gesture events'];
+  'predicted per event avg', 'pen event rate', 'rAF rate']
+  .concat(['raw', 'raw-pf', 'konva-frame', 'konva-pointer'].reduce(function (a, e) {
+    return a.concat(['frame time ' + e + ' drawing', 'frame time ' + e + ' panning', 'latency estimate ' + e + ' drawing', 'latency estimate ' + e + ' panning']);
+  }, []))
+  .concat(['large contacts (kept, logged only)', 'touches rejected during pen strokes', 'leaked scroll offset changed', 'leaked visualViewport scale changed',
+  'leaked selection non-empty', 'strokes drawn', 'strokes on canvas at end', 'undo count', 'eraser uses', 'export PNG done', 'export JSON done', 'unknown events', 'gesture events']);
 function range(a, b) { return isFinite(a) ? f1(a) + ' .. ' + f1(b) : 'n/a'; }
 function buildReport() {
   var L = [], put = function (k, v) { L.push(k + ': ' + v); };
   var types = Object.keys(M.types).map(function (t) { return t + '=' + M.types[t].n; }).join(', ') || 'none';
   var wk = !!(window.webkit && window.webkit.messageHandlers);
   var standalone = !!(navigator.standalone || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches));
-  var hz = typeHz('pen'), rh = rafHz(), allFrames = [];
-  ENGINES.forEach(function (e) { allFrames = allFrames.concat(M.per[e].frames); });
+  var hz = typeHz('pen'), rh = rafHz();
   var rafAvg = stats(M.rafWin.map(function (x) { return x[1]; }));
   put('date', new Date().toISOString());
   put('userAgent', navigator.userAgent);
@@ -667,6 +767,11 @@ function buildReport() {
   put('devicePixelRatio', window.devicePixelRatio);
   put('screen size', (screen.width || 0) + 'x' + (screen.height || 0));
   put('viewport size', window.innerWidth + 'x' + window.innerHeight);
+  var ua = navigator.userAgent || '';
+  var ipad = (navigator.maxTouchPoints > 1 && navigator.platform === 'MacIntel') ? 'iPad (desktop UA)' : (/iPad/.test(ua) ? 'iPad' : (/iPhone/.test(ua) ? 'iPhone' : navigator.platform));
+  put('device', ipad + ' (iPadOS sends a Mac UA in desktop-site mode)');
+  put('engine', ipad.indexOf('iPad') === 0 ? 'WebKit (all iPadOS browsers use it)' : (/Firefox\//.test(ua) ? 'Gecko' : (/AppleWebKit/.test(ua) ? 'WebKit/Blink' : 'unknown')));
+  put('host', /FxiOS/.test(ua) ? 'Firefox' : (/CriOS/.test(ua) ? 'Chrome' : (wk ? 'in-app web view (Firefox desktop mode, other browser or own app)' : 'Safari')));
   put('WKWebView guess', (wk ? 'yes (webkit.messageHandlers present)' : 'no (plain browser)') + ', standalone/home-screen: ' + (standalone ? 'yes' : 'no'));
   put('engines used', Object.keys(M.used).join(', '));
   put('perfect-freehand', PF_VERSION + ' (MIT), inlined bundle sha256 ' + PF_SHA + (window.PerfectFreehand ? '' : ' [NOT LOADED]'));
@@ -684,14 +789,19 @@ function buildReport() {
   put('predicted per event avg', M.pr.n ? f1(M.pr.sum / M.pr.n) : 'n/a');
   put('pen event rate', hz ? f1(hz) + ' Hz (mean while pen moving)' : 'n/a');
   put('rAF rate', (rh ? f1(rh) + ' Hz' : 'n/a') + (rafAvg ? ', last 2 s frame avg/p95/worst ' + f1(rafAvg.avg) + '/' + f1(rafAvg.p95) + '/' + f1(rafAvg.worst) + ' ms' : ''));
-  ENGINES.forEach(function (e) { put('frame time ' + e, fmtStats(stats(M.per[e].frames)) + ' while drawing/panning'); });
-  ENGINES.forEach(function (e) { put('latency estimate ' + e, fmtStats(stats(M.per[e].lat)) + ' (event.timeStamp to next rAF; estimate, excludes display scanout)'); });
-  put('palm candidates', M.palm);
+  ENGINES.forEach(function (e) {
+    ['drawing', 'panning'].forEach(function (k) {
+      put('frame time ' + e + ' ' + k, fmtStats(stats(M.per[e].frames[k])));
+      put('latency estimate ' + e + ' ' + k, fmtStats(stats(M.per[e].lat[k])) + ' (event.timeStamp to next rAF; estimate, excludes display scanout)');
+    });
+  });
+  put('large contacts (kept, logged only)', M.largeContacts);
   put('touches rejected during pen strokes', M.rejected);
   put('leaked scroll offset changed', M.leaks.scroll);
   put('leaked visualViewport scale changed', M.leaks.vv);
   put('leaked selection non-empty', M.leaks.sel);
   put('strokes drawn', M.strokes + ' (' + ENGINES.map(function (e) { return e + '=' + M.per[e].strokes; }).join(', ') + ')');
+  put('strokes on canvas at end', S.strokes.length);
   put('undo count', M.undo);
   put('eraser uses', M.eraserGestures + ' gestures, ' + M.erasedStrokes + ' strokes removed');
   put('export PNG done', M.exportPNG ? 'y' : 'n');
@@ -731,6 +841,11 @@ function wire() {
   rawCanvas.addEventListener('pointermove', function (ev) { if (rawOn()) handlePointer(ev, 'move'); });
   rawCanvas.addEventListener('pointerup', function (ev) { if (rawOn()) handlePointer(ev, 'up'); });
   rawCanvas.addEventListener('pointercancel', function (ev) { if (rawOn()) handlePointer(ev, 'up'); });
+  // pen-active safety: never let a lost pointerup leave the pen flag stuck
+  var penGone = function (ev) { if (S.penId != null && ev.pointerId === S.penId) up(fromPointer(ev, 'up')); };
+  rawCanvas.addEventListener('lostpointercapture', penGone);
+  document.addEventListener('pointerup', penGone);
+  document.addEventListener('pointercancel', penGone);
   // no browser interference
   ['touchstart', 'touchmove', 'gesturestart', 'gesturechange', 'dblclick'].forEach(function (n) {
     host.addEventListener(n, function (ev) { if (n.indexOf('gesture') === 0) M.gestures++; ev.preventDefault(); }, { passive: false });
@@ -741,7 +856,8 @@ function wire() {
     ev.preventDefault();
     var r = hostRect(), f = ev.deltaY < 0 ? 1.1 : 1 / 1.1, v = S.view;
     var ix = (ev.clientX - r.left - v.x) / v.scale, iy = (ev.clientY - r.top - v.y) / v.scale;
-    v.scale = clamp(v.scale * f, 0.05, 40); v.x = ev.clientX - r.left - ix * v.scale; v.y = ev.clientY - r.top - iy * v.scale; S.dirty = true;
+    v.scale = clamp(v.scale * f, 0.05, 40); v.x = ev.clientX - r.left - ix * v.scale; v.y = ev.clientY - r.top - iy * v.scale;
+    S.wheelUntil = (ev.timeStamp || 0) + 150; S.dirty = true;
   }, { passive: false });
   window.addEventListener('keydown', function (ev) {
     if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'z' || ev.key === 'Z')) { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); }
@@ -791,7 +907,7 @@ setBackground(makeTestFrame());
 setEngine('raw');
 
 window.PencilTest = {
-  S: S, M: M, K: K, ENGINES: ENGINES, REPORT_LABELS: REPORT_LABELS, PALM_MIN: PALM_MIN,
+  S: S, M: M, K: K, ENGINES: ENGINES, REPORT_LABELS: REPORT_LABELS, LARGE_CONTACT_MIN: LARGE_CONTACT_MIN, COUNTERS: COUNTERS, bake: bake,
   down: down, move: move, up: up, undo: undo, redo: redo, eraseAt: eraseAt,
   widthFor: widthFor, toImage: toImage, setEngine: setEngine, fit: fit, resize: resize,
   exportData: exportData, exportJSON: exportJSON, exportPNG: exportPNG, buildReport: buildReport, copyReport: copyReport,
